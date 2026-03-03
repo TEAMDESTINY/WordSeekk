@@ -17,6 +17,7 @@ import { seekAuthCommand } from "./seekauth";
 import { transferCommand } from "./transfer";
 import { broadcastCommand } from "./broadcast";
 import { startMatchCommand } from "./startmatch";
+import { endWorldleCommand } from "./end-worldle";
 import { leaderboardCommand } from "./leaderboard";
 import { allowOnlyLenCommand } from "./allowonlylen";
 import { setGameTopicCommand } from "./setgametopic";
@@ -48,6 +49,7 @@ composer.use(
   allowOnlyLenCommand,
   recreateTopicCommand,
   worldleCommand,
+  endWorldleCommand,
 );
 
 export const commands = composer;
