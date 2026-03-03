@@ -114,6 +114,23 @@ export interface UserStat {
   userId: string;
 }
 
+export interface WorldleGame {
+  chatId: string;
+  countryCode: string;
+  createdAt: Generated<Timestamp>;
+  id: Generated<number>;
+  topicId: string;
+  updatedAt: Generated<Timestamp>;
+}
+
+export interface WorldleGuess {
+  createdAt: Generated<Timestamp>;
+  distanceKm: number;
+  gameId: number;
+  guessCode: string;
+  id: Generated<number>;
+}
+
 export interface DB {
   authorizedUsers: AuthorizedUser;
   bannedUsers: BannedUser;
@@ -126,4 +143,6 @@ export interface DB {
   leaderboard: Leaderboard;
   users: User;
   userStats: UserStat;
+  worldleGames: WorldleGame;
+  worldleGuesses: WorldleGuess;
 }

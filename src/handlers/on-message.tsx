@@ -1,5 +1,5 @@
-import { InputFile } from "grammy";
 import { ReactionTypeEmoji } from "grammy/types";
+import { CommandContext, InputFile } from "grammy";
 import { Composer, Context, GrammyError } from "grammy";
 
 import z from "zod";
@@ -11,9 +11,11 @@ import { readFile } from "fs/promises";
 import { db } from "../config/db";
 import { redis } from "../config/redis";
 import allSixWords from "../data/all-six.json";
+import countries from "../data/countries.json";
 import allFiveWords from "../data/all-five.json";
 import allFourWords from "../data/all-four.json";
 import { toFancyText } from "../util/to-fancy-text";
+import { getDistanceKm } from "../util/get-distance";
 import { requireAllowedTopic, runGuards } from "../util/guards";
 import { formatDailyWordDetails } from "../util/format-word-details";
 import { getCurrentGameDateString } from "../services/daily-wordle-cron";
@@ -39,8 +41,448 @@ export const dailyWordleSchema = z.object({
   date: z.string(),
 });
 
+const normalize = (str: string) => str.trim().toLowerCase();
+
+const countryMap = new Map(countries.map((c) => [c.code, c]));
+
+async function handleWorldle(ctx: Context) {
+  if (!ctx.msg || !ctx.chat || !ctx.message) return;
+
+  const currentTopicId = ctx.msg.message_thread_id?.toString() || "general";
+  const chatId = ctx.chat.id.toString();
+
+  const worldleGame = await db
+    .selectFrom("worldleGames")
+    .selectAll()
+    .where("chatId", "=", chatId)
+    .where("topicId", "=", currentTopicId)
+    .executeTakeFirst();
+
+  if (!worldleGame) return;
+
+  if (worldleGame) {
+    const guessText = normalize(ctx.message.text ?? "");
+
+    const guessedCountry = countries.find((c) => c.aliases.includes(guessText));
+
+    if (!guessedCountry) return;
+
+    const correctCountry = countryMap.get(worldleGame.countryCode)!;
+
+    const distance = getDistanceKm(
+      guessedCountry.lat,
+      guessedCountry.lng,
+      correctCountry.lat,
+      correctCountry.lng,
+    );
+
+    await db
+      .insertInto("worldleGuesses")
+      .values({
+        gameId: worldleGame.id,
+        guessCode: guessedCountry.code,
+        distanceKm: distance,
+      })
+      .execute();
+
+    if (guessedCountry.code === correctCountry.code) {
+      await handleWorldleWin(ctx, correctCountry);
+      await db
+        .deleteFrom("worldleGames")
+        .where("id", "=", worldleGame.id)
+        .execute();
+      return;
+    }
+
+    const guesses = await db
+      .selectFrom("worldleGuesses")
+      .selectAll()
+      .where("gameId", "=", worldleGame.id)
+      .orderBy("id", "asc")
+      .execute();
+
+    const guessLines = guesses
+      .map((g, i) => {
+        const country = countryMap.get(g.guessCode)!;
+        return `${i + 1}. ${country.name} — ${g.distanceKm.toLocaleString()} km`;
+      })
+      .join("\n");
+
+    const imagePath = join(
+      process.cwd(),
+      "src",
+      "data",
+      "countries",
+      `${correctCountry.code.toLowerCase()}.png`,
+    );
+
+    await ctx.replyWithPhoto(new InputFile(imagePath), {
+      caption: `🌍 Worldle\n\n<b>Distance from the country:</b>\n${guessLines}`,
+    });
+  }
+}
+
+async function handleWorldleWin(
+  ctx: Context,
+  country:
+    | {
+        code: string;
+        name: string;
+        aliases: string[];
+        flag: string;
+        lat: number;
+        lng: number;
+        capital: string;
+        region: string;
+        population: number;
+      }
+    | {
+        code: string;
+        name: string;
+        aliases: string[];
+        flag: string;
+        lat: number;
+        lng: number;
+        region: string;
+        population: number;
+        capital: undefined;
+      },
+) {
+  const silhouettePath = join(
+    process.cwd(),
+    "src",
+    "data",
+    "countries",
+    `${country.code.toLowerCase()}.png`,
+  );
+
+  const silhouette = await readFile(silhouettePath);
+  const greenSilhouette = await sharp(silhouette).tint("#2ecc71").toBuffer();
+
+  const fontPath = join(process.cwd(), "src/fonts/roboto.ttf");
+  const fontData = await readFile(fontPath);
+
+  const svg = await satori(
+    <div
+      style={{
+        display: "flex",
+        width: 800,
+        height: 400,
+        background: "linear-gradient(145deg, #0a0f1e 0%, #111d2b 100%)",
+        position: "relative",
+        overflow: "hidden",
+        fontFamily: "Inter",
+        color: "white",
+      }}
+    >
+      {/* Decorative Background Orbs */}
+      <div
+        style={{
+          position: "absolute",
+          width: 500,
+          height: 500,
+          borderRadius: "50%",
+          background:
+            "radial-gradient(circle, rgba(16, 185, 129, 0.12) 0%, transparent 70%)",
+          top: -150,
+          left: -150,
+          display: "flex",
+        }}
+      />
+      <div
+        style={{
+          position: "absolute",
+          width: 400,
+          height: 400,
+          borderRadius: "50%",
+          background:
+            "radial-gradient(circle, rgba(59, 130, 246, 0.08) 0%, transparent 70%)",
+          bottom: -100,
+          right: -50,
+          display: "flex",
+        }}
+      />
+
+      {/* World Map Dot Pattern */}
+      <div
+        style={{
+          position: "absolute",
+          inset: 0,
+          opacity: 0.1,
+          backgroundImage:
+            "radial-gradient(rgba(255,255,255,0.2) 1px, transparent 1px)",
+          backgroundSize: "24px 24px",
+          display: "flex",
+        }}
+      />
+
+      {/* LEFT SIDE — Silhouette with colorize filter */}
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          width: 320,
+          position: "relative",
+          background: "rgba(255, 255, 255, 0.02)",
+          borderRight: "1px solid rgba(255, 255, 255, 0.05)",
+        }}
+      >
+        {/* Silhouette Glow */}
+        <div
+          style={{
+            position: "absolute",
+            width: 240,
+            height: 240,
+            borderRadius: "50%",
+            background:
+              "radial-gradient(circle, rgba(16, 185, 129, 0.2) 0%, transparent 70%)",
+            display: "flex",
+          }}
+        />
+
+        {/* Silhouette Image */}
+        <img
+          src={`data:image/png;base64,${greenSilhouette.toString("base64")}`}
+          style={{
+            width: 200,
+            height: 200,
+            objectFit: "contain",
+            filter:
+              "invert(1) sepia(1) saturate(6) hue-rotate(100deg) brightness(0.85)",
+            display: "flex",
+          }}
+        />
+
+        <div
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            marginTop: 24,
+            alignItems: "center",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              color: "rgba(255,255,255,0.4)",
+              fontSize: 11,
+              textTransform: "uppercase",
+              letterSpacing: 2,
+              fontWeight: 600,
+            }}
+          >
+            Region
+          </div>
+          <div
+            style={{
+              display: "flex",
+              color: "#fff",
+              fontSize: 20,
+              fontWeight: 700,
+            }}
+          >
+            {country.region}
+          </div>
+        </div>
+      </div>
+
+      {/* RIGHT SIDE — Details */}
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          justifyContent: "center",
+          flex: 1,
+          padding: "0 60px",
+        }}
+      >
+        {/* Header: Flag + Code */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 14,
+            marginBottom: 8,
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              borderRadius: 4,
+              overflow: "hidden",
+              width: 48,
+              height: 32,
+              border: "1px solid rgba(255,255,255,0.15)",
+            }}
+          >
+            <img
+              src={country.flag}
+              style={{ width: 48, height: 32, display: "flex" }}
+            />
+          </div>
+          <div
+            style={{
+              display: "flex",
+              color: "#10b981",
+              fontWeight: 800,
+              fontSize: 14,
+              letterSpacing: 1.5,
+            }}
+          >
+            {country.code}
+          </div>
+        </div>
+
+        {/* Name */}
+        <div
+          style={{
+            display: "flex",
+            fontSize: 56,
+            fontWeight: 800,
+            letterSpacing: "-1.5px",
+            lineHeight: 1.1,
+            marginBottom: 32,
+            color: "#ffffff",
+          }}
+        >
+          {country.name}
+        </div>
+
+        {/* Grid Data - Improved Spacing for Long Names */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 28 }}>
+          {/* Row 1: Capital & Population */}
+          <div style={{ display: "flex", gap: 40 }}>
+            {/* Capital Column - Using flex: 1 to ensure space allocation */}
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 6,
+                flex: 1,
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  color: "rgba(255,255,255,0.4)",
+                  fontSize: 11,
+                  fontWeight: 600,
+                  textTransform: "uppercase",
+                  letterSpacing: 1,
+                }}
+              >
+                Capital
+              </div>
+              <div
+                style={{
+                  display: "flex",
+                  color: "#ffffff",
+                  fontWeight: 700,
+                  fontSize: 18,
+                  lineHeight: 1.3,
+                  maxWidth: "240px",
+                  wordBreak: "break-word",
+                }}
+              >
+                {country.capital ?? "N/A"}
+              </div>
+            </div>
+
+            {/* Population Column */}
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 6,
+                flex: 1,
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  color: "rgba(255,255,255,0.4)",
+                  fontSize: 11,
+                  fontWeight: 600,
+                  textTransform: "uppercase",
+                  letterSpacing: 1,
+                }}
+              >
+                Population
+              </div>
+              <div
+                style={{
+                  display: "flex",
+                  color: "#ffffff",
+                  fontWeight: 700,
+                  fontSize: 18,
+                }}
+              >
+                {country.population.toLocaleString()}
+              </div>
+            </div>
+          </div>
+
+          {/* Row 2: Coordinates */}
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <div
+              style={{
+                display: "flex",
+                color: "rgba(255,255,255,0.4)",
+                fontSize: 11,
+                fontWeight: 600,
+                textTransform: "uppercase",
+                letterSpacing: 1,
+              }}
+            >
+              Coordinates
+            </div>
+            <div
+              style={{
+                display: "flex",
+                color: "rgba(255,255,255,0.6)",
+                fontSize: 15,
+                fontWeight: 500,
+                fontFamily: "monospace",
+              }}
+            >
+              {country.lat.toFixed(2)}° N / {country.lng.toFixed(2)}° E
+            </div>
+          </div>
+        </div>
+
+        {/* Bottom Accent Line */}
+        <div
+          style={{
+            display: "flex",
+            marginTop: 36,
+            height: 3,
+            width: 80,
+            borderRadius: 2,
+            background: "linear-gradient(90deg, #10b981, transparent)",
+          }}
+        />
+      </div>
+    </div>,
+    {
+      width: 800,
+      height: 400,
+      fonts: [{ name: "Roboto", data: fontData, weight: 700 }],
+    },
+  );
+
+  const png = await sharp(Buffer.from(svg)).png().toBuffer();
+
+  await ctx.replyWithPhoto(new InputFile(png), {
+    caption: `🎉 Correct! It was ${country.name}.`,
+  });
+}
+
 composer.on("message:text", async (ctx) => {
   const currentGuess = ctx.message.text?.toLowerCase();
+
+  await handleWorldle(ctx);
 
   const isValidWord = /^[a-z]{4,6}$/.test(currentGuess ?? "");
 
